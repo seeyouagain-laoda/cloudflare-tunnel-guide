@@ -120,7 +120,18 @@ curl https://svc.yourdomain.com/
 
 **根因**：Mihomo/Clash 用 **TProxy（CONNMARK）** 在网络层劫持 53 端口 DNS，把所有域名解析成 `198.18.x.x` 假 IP。改 `/etc/resolv.conf` **无效**（拦截在网络层）。`--protocol http2` 拨到假 IP 后 TLS 握手失败。
 
-**解法**：cloudflared **用默认 `quic` 协议**（别加 `--protocol http2`）。quic 在这种假 IP 环境下能自愈并连上真 CF 边缘。日志最终出现 `HEALTHY` + 连到真实边缘节点（如 `nrt09`/`nrt14` 东京）即正常。
+**解法（两层，缺一不可）**：
+1. **第一层（握手自愈）**：cloudflared **用默认 `quic` 协议**（别加 `--protocol http2`）。quic 在假 IP 环境下能自愈并连上真 CF 边缘，日志出现 `HEALTHY` + 连到真实节点即正常。
+2. **第二层（持久化，必须做）⚠️**：`quic` 只是「握手瞬间自愈」，**不是根治**。一旦 NAS 重启、Mihomo TUN 重新接管，cloudflared 连 `argotunnel.com` 的流量仍会被甩到代理 + 返假 IP，隧道**照样挂**（实测：fnOS 升级重启后外网 530/502）。根治要在 Mihomo `config.yaml` 把隧道域名放行：
+   ```yaml
+   dns:
+     fake-ip-filter:
+       - '+.argotunnel.com'        # 让 argotunnel 返回真实 IP（而非 198.18.x.x 假 IP）
+   rules:
+     - DOMAIN-SUFFIX,argotunnel.com,DIRECT   # 隧道流量直连 Cloudflare，不走代理
+     - MATCH,proxy
+   ```
+   改完 `systemctl restart mihomo`（仅 TUN 实例），再 `docker restart cloudflared`（清旧假 IP 缓存）。**改一次永久生效，重启不再复发。**
 
 ### 坑 2 · 子域拼写错误，查错域名一直 NXDOMAIN
 
@@ -154,15 +165,38 @@ curl https://svc.yourdomain.com/
 
 **解法**：必须用**命名隧道 + 自有域名**（步骤 2–4），命名隧道才支持 SSE。
 
+### 坑 6 · NAS 重启后隧道/反代不自动起来
+
+**现象**：NAS 升级或重启后，外网 530/502，cloudflared 在重连循环。排查发现反代容器 `restart=no`、或 Mihomo 起来后把 `argotunnel.com` 又劫持了（见坑 1 第二层）。
+
+**解法（重启自愈三保障，缺一不可）**：
+1. `argotunnel.com` DIRECT 规则已写进 Mihomo `config.yaml`（坑 1 第二层）——否则每次重启隧道必挂。
+2. 关键容器设 `--restart unless-stopped`：
+   ```bash
+   docker update --restart unless-stopped cloudflared antigravity-manager
+   ```
+3. Mihomo / Docker 开机自启（systemd `enabled`）：
+   ```bash
+   systemctl enable mihomo.service docker.service
+   ```
+
+**实测重启自愈**：发 `sudo reboot` 后，SSH 约 59s 恢复，cloudflared 容器约 +40s 自动拉起，外网 `gemini`/`nas` 约 +60s 全绿，**整套约 2 分钟自动恢复，无需人工干预**。
+
 ---
 
 ## 六、安全加固（强烈建议）
 
 公开域名后，陌生人能扫到端点。建议：
 
-1. **Cloudflare Access（最重要）**
-   Zero Trust → Access → 应用程序 → 添加 → 类型 **Self-hosted** → 域名 `nas.yourdomain.com` → 策略只允许你自己的邮箱 / Google 账号（一次性验证码）。
-   效果：别人连登录页都看不到，先被 CF 拦住。NAS 管理页**必须加**。
+1. **Cloudflare Access（最重要，护「人访问」的页面）**
+   Zero Trust → **访问控制** → **应用程序** → **添加应用程序** → 类型 **自托管** → 子域 `nas` / 域 `yourdomain.com` → 策略操作 **允许**、选择器 **电子邮件**、值填你自己的邮箱 → 身份验证关闭「使用 Cloudflare One Client」、确认 **一次性 PIN** 已勾 → **添加应用程序**。
+   - 效果：别人连登录页都看不到，先被 CF 弹邮箱验证页拦住；验证方式=邮箱收 **Verify 链接**（点一下即过，不用手敲码），同浏览器会话期内不再弹。
+   - **NAS 管理页（`nas.yourdomain.com`）必须加**——fnOS 今年爆过认证绕过/路径遍历漏洞，Access 能从外部挡掉未授权访问与未知 0day。
+   - ⚠️ **翻车点**：邮箱值**必须带 `@`**（写成 `abc.gmail.com` 会导致策略 100% 阻止）；**别在 Tunnel 路由页勾「用 Access 保护」**（旧集成要 AUD tag，会卡死），Access 必须单独在 Zero Trust 建。
+
+   > 🚨 **关键铁律：API 端点不要套 Access 邮箱 OTP！**
+   > 反代（`svc.yourdomain.com`）、网关这类**被程序/客户端调用**的服务，**绝不能**加邮箱 OTP——程序不会收邮件、不会点链接，套上后你的 AI 客户端 / 脚本调 `base_url` 全返回 CF 验证页、直接挂掉。这类端点靠**自身 API Key 鉴权**即可（无 key 返回 401）。Access 只给「人开浏览器」的服务（如 fnOS 管理页）叠。
+
 2. **WAF + 速率限制**
    Security → WAF → 单 IP 每分钟 > 30 请求则挑战/拦截，防爆破和刷量。
 3. **强随机 API Key**
@@ -224,7 +258,9 @@ A：有。一旦 CF outage 全断，建议备好回滚（Tailscale / frp）。
 - [ ] DNSSEC 未开
 - [ ] 建命名隧道，拿到 token
 - [ ] NAS 起 cloudflared（`--network host`，默认 quic）
+- [ ] NAS 跑 Mihomo/Clash 透明代理时，**在 config.yaml 把 `argotunnel.com` 设 DIRECT + 真实 IP**（否则重启必挂）
+- [ ] 关键容器 `docker update --restart unless-stopped cloudflared <反代容器>`；Mihomo/Docker `systemctl enable`
 - [ ] 加 Public Hostname（HTTP/HTTPS + noTLSVerify 按需）
 - [ ] 外网实测返回 200 / 401
-- [ ]（必做）给管理页叠 Cloudflare Access
+- [ ]（必做）给「人访问」的管理页叠 Cloudflare Access；**API 端点不要套 Access**
 - [ ]（待办）acme.sh 切 `dns_cf`，避免证书续期失败
