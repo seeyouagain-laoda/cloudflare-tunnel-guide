@@ -104,7 +104,7 @@ curl https://svc.yourdomain.com/
 
 | 项 | 外网 | 局域网 | Tailscale |
 |---|---|---|---|
-| Base URL | `https://svc.yourdomain.com` | `http://192.168.1.100:8045` | `http://100.x.x.x:8045` |
+| Base URL | `https://svc.yourdomain.com` | `http://<NAS_IP>:8045` | `http://100.x.x.x:8045` |
 | API Key | 同一个 `<API_KEY>` | 同 | 同 |
 
 - 家里设备优先用**局域网直连**，最快最稳、不耗 CF 带宽。

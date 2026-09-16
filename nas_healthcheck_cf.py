@@ -5,7 +5,7 @@
 适用：跑了 Cloudflare Tunnel 的家庭 NAS，一键体检「磁盘/RAID/系统/服务/暴露面/SSH/备份 + CF 公网可达」。
 
 使用前请修改下方 CONFIG 区（全部占位符改成你自己的）：
-  - NAS_HOST   : SSH 登录串，形如 "user@192.168.1.100"
+  - NAS_HOST   : SSH 登录串，形如 "user@<NAS_IP>"
   - SSH_KEY    : 本机私钥路径（key 登录优先；也可改为密码登录）
   - SUDO_PASS  : sudo 密码（脚本用 `echo pass | sudo -S` 提权；若你的 sudo 免密可留空，并改 _ssh_run）
   - DOMAIN     : 你的域名（不含子域），如 "yourdomain.com"
@@ -21,7 +21,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 # ───────── CONFIG（改成你自己的） ─────────
 SSH_EXE  = shutil.which("ssh") or r"C:/Windows/System32/OpenSSH/ssh.exe"
 SSH_KEY  = os.path.expanduser("~/.ssh/your_nas_key")   # TODO: 改成你的私钥
-SSH_HOST = "user@192.168.1.100"                        # TODO: 改成 "用户@NAS内网IP"
+SSH_HOST = "user@<NAS_IP>"                        # TODO: 改成 "用户@NAS内网IP"
 SSH_PASS = "CHANGE_ME"                                 # TODO: sudo 密码（若免密 sudo 可留空并改 _ssh_run）
 DOMAIN   = "yourdomain.com"                            # TODO: 你的域名
 SUB_GEMINI   = "gemini"    # CF 面板建的 gemini 子域（反代，API 端点，不加 Access）
